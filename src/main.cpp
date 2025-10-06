@@ -13,19 +13,16 @@ float THRESHOLD = 300.0f;     // Trigger threshold (calibrated)
 float HYSTERESIS = 200.0f;    // Re-arm threshold (calibrated)
 static const uint32_t REFRACT_MS = 300;  // debounce between waves
 
-// Calibration parameters
-static const uint32_t CALIBRATION_DURATION_MS = 10000;  // 10 seconds calibration
-static const uint32_t CALIBRATION_SAMPLE_INTERVAL_MS = 50;  // Sample every 50ms
+// Continuous calibration parameters
+#define SAMPLE_BUFFER_SIZE 100  // Rolling buffer of recent samples
+#define MIN_SAMPLES_FOR_ANALYSIS 20  // Minimum samples needed for analysis
+#define ANALYSIS_INTERVAL_MS 2000  // Recalculate thresholds every 2 seconds
 
-// Calibration state
-bool calibrationMode = true;
-uint32_t calibrationStartMs = 0;
-
-// Wave analysis arrays
-#define MAX_SAMPLES 200  // 10 seconds * 20 samples/second
-float dpsSamples[MAX_SAMPLES];
-int sampleIndex = 0;
-bool samplesCollected = false;
+// Continuous calibration state
+float sampleBuffer[SAMPLE_BUFFER_SIZE];
+int bufferIndex = 0;
+bool bufferFull = false;
+uint32_t lastAnalysisMs = 0;
 
 bool armed = true;
 uint32_t lastEventMs = 0;
@@ -35,102 +32,107 @@ bool ledBlinking = false;
 uint32_t ledBlinkStartMs = 0;
 static const uint32_t LED_BLINK_DURATION_MS = 100;
 
-void startCalibration() {
-    calibrationMode = true;
-    calibrationStartMs = millis();
-    sampleIndex = 0;
-    samplesCollected = false;
-    Serial.println("=== CALIBRATION STARTED ===");
-    Serial.println("Please move the sensor naturally for 10 seconds...");
-    Serial.println("Make some gentle waves and movements to establish baseline.");
+void initializeContinuousCalibration() {
+    bufferIndex = 0;
+    bufferFull = false;
+    lastAnalysisMs = millis();
+    Serial.println("=== CONTINUOUS CALIBRATION STARTED ===");
+    Serial.println("System will continuously adapt thresholds based on sensor data.");
+    Serial.println("Move the sensor naturally to establish baseline patterns.");
 }
 
-// Advanced wave analysis function
-void analyzeWavePatterns() {
-    if (sampleIndex < 10) return; // Need at least 10 samples
+// Continuous wave analysis function
+void analyzeRecentSamples() {
+    int sampleCount = bufferFull ? SAMPLE_BUFFER_SIZE : bufferIndex;
+    if (sampleCount < MIN_SAMPLES_FOR_ANALYSIS) return;
     
-    // Sort samples for percentile analysis
-    float sortedSamples[MAX_SAMPLES];
-    for (int i = 0; i < sampleIndex; i++) {
-        sortedSamples[i] = dpsSamples[i];
+    // Create working copy for sorting
+    float workingSamples[SAMPLE_BUFFER_SIZE];
+    for (int i = 0; i < sampleCount; i++) {
+        workingSamples[i] = sampleBuffer[i];
     }
     
     // Simple bubble sort
-    for (int i = 0; i < sampleIndex - 1; i++) {
-        for (int j = 0; j < sampleIndex - i - 1; j++) {
-            if (sortedSamples[j] > sortedSamples[j + 1]) {
-                float temp = sortedSamples[j];
-                sortedSamples[j] = sortedSamples[j + 1];
-                sortedSamples[j + 1] = temp;
+    for (int i = 0; i < sampleCount - 1; i++) {
+        for (int j = 0; j < sampleCount - i - 1; j++) {
+            if (workingSamples[j] > workingSamples[j + 1]) {
+                float temp = workingSamples[j];
+                workingSamples[j] = workingSamples[j + 1];
+                workingSamples[j + 1] = temp;
             }
         }
     }
     
-    // Calculate percentiles
-    float p10 = sortedSamples[(int)(sampleIndex * 0.1)];  // 10th percentile (quiet periods)
-    float p50 = sortedSamples[(int)(sampleIndex * 0.5)];  // 50th percentile (median)
-    float p90 = sortedSamples[(int)(sampleIndex * 0.9)];  // 90th percentile (active periods)
-    float p95 = sortedSamples[(int)(sampleIndex * 0.95)]; // 95th percentile (strong movements)
+    // Calculate percentiles from recent samples
+    float p25 = workingSamples[(int)(sampleCount * 0.25)];  // 25th percentile
+    float p50 = workingSamples[(int)(sampleCount * 0.50)];  // 50th percentile (median)
+    float p75 = workingSamples[(int)(sampleCount * 0.75)];  // 75th percentile
+    float p90 = workingSamples[(int)(sampleCount * 0.90)];  // 90th percentile
     
-    // Calculate baseline noise (average of bottom 30%)
+    // Calculate baseline noise (average of bottom 40%)
     float baselineNoise = 0;
-    int baselineCount = (int)(sampleIndex * 0.3);
+    int baselineCount = (int)(sampleCount * 0.4);
     for (int i = 0; i < baselineCount; i++) {
-        baselineNoise += sortedSamples[i];
+        baselineNoise += workingSamples[i];
     }
     baselineNoise /= baselineCount;
     
-    // Calculate wave activity (average of top 20%)
-    float waveActivity = 0;
-    int waveCount = (int)(sampleIndex * 0.2);
-    for (int i = sampleIndex - waveCount; i < sampleIndex; i++) {
-        waveActivity += sortedSamples[i];
+    // Calculate recent activity (average of top 30%)
+    float recentActivity = 0;
+    int activityCount = (int)(sampleCount * 0.3);
+    for (int i = sampleCount - activityCount; i < sampleCount; i++) {
+        recentActivity += workingSamples[i];
     }
-    waveActivity /= waveCount;
+    recentActivity /= activityCount;
     
-    // Smart threshold calculation
-    // Use 75th percentile as base threshold (between median and high activity)
-    float baseThreshold = sortedSamples[(int)(sampleIndex * 0.75)];
+    // Adaptive threshold calculation
+    // Use 75th percentile as base, but ensure it's above noise
+    float newThreshold = max(p75, baselineNoise * 2.5f);
+    newThreshold = min(newThreshold, recentActivity * 0.7f); // Don't go too high
     
-    // Ensure threshold is at least 2x baseline noise and not too high
-    THRESHOLD = max(baseThreshold, baselineNoise * 2.0f);
-    THRESHOLD = min(THRESHOLD, waveActivity * 0.8f); // Don't go too high
+    // Adaptive hysteresis calculation
+    float newHysteresis = max(baselineNoise * 1.8f, newThreshold * 0.5f);
+    newHysteresis = min(newHysteresis, newThreshold * 0.8f);
     
-    // Hysteresis should be between baseline and threshold
-    HYSTERESIS = max(baselineNoise * 1.5f, THRESHOLD * 0.4f);
-    HYSTERESIS = min(HYSTERESIS, THRESHOLD * 0.7f);
+    // Smooth threshold changes to avoid sudden jumps
+    float thresholdChange = newThreshold - THRESHOLD;
+    float hysteresisChange = newHysteresis - HYSTERESIS;
     
-    // Ensure reasonable minimums
-    if (THRESHOLD < 20.0f) THRESHOLD = 20.0f;
-    if (HYSTERESIS < 10.0f) HYSTERESIS = 10.0f;
+    // Apply gradual changes (max 20% change per analysis)
+    THRESHOLD += thresholdChange * 0.2f;
+    HYSTERESIS += hysteresisChange * 0.2f;
     
-    Serial.println("=== CALIBRATION COMPLETE ===");
-    Serial.printf("Samples analyzed: %d\n", sampleIndex);
-    Serial.printf("Baseline noise (bottom 30%%): %.2f DPS\n", baselineNoise);
-    Serial.printf("Wave activity (top 20%%): %.2f DPS\n", waveActivity);
-    Serial.printf("P10: %.2f, P50: %.2f, P90: %.2f, P95: %.2f\n", p10, p50, p90, p95);
-    Serial.printf("Calculated THRESHOLD: %.2f DPS\n", THRESHOLD);
-    Serial.printf("Calculated HYSTERESIS: %.2f DPS\n", HYSTERESIS);
-    Serial.println("Ready for wave detection!");
+    // Ensure reasonable bounds
+    if (THRESHOLD < 15.0f) THRESHOLD = 15.0f;
+    if (THRESHOLD > 1000.0f) THRESHOLD = 1000.0f;
+    if (HYSTERESIS < 8.0f) HYSTERESIS = 8.0f;
+    if (HYSTERESIS > THRESHOLD * 0.9f) HYSTERESIS = THRESHOLD * 0.9f;
+    
+    // Debug output (less frequent)
+    static uint32_t lastDebugMs = 0;
+    if (millis() - lastDebugMs > 5000) { // Every 5 seconds
+        Serial.printf("Adaptive thresholds - Samples: %d, TH: %.1f, HY: %.1f\n", 
+            sampleCount, THRESHOLD, HYSTERESIS);
+        lastDebugMs = millis();
+    }
 }
 
-// Calibration function
-void performCalibration(float currentDps) {
+// Continuous sample collection and analysis
+void collectAndAnalyzeSample(float currentDps) {
     uint32_t now = millis();
     
-    if (calibrationMode) {
-        // Collect samples during calibration
-        if (sampleIndex < MAX_SAMPLES) {
-            dpsSamples[sampleIndex] = currentDps;
-            sampleIndex++;
-        }
-        
-        // Check if calibration is complete
-        if (now - calibrationStartMs >= CALIBRATION_DURATION_MS) {
-            analyzeWavePatterns();
-            calibrationMode = false;
-            // No re-calibration - calibration is complete
-        }
+    // Add sample to rolling buffer
+    sampleBuffer[bufferIndex] = currentDps;
+    bufferIndex++;
+    if (bufferIndex >= SAMPLE_BUFFER_SIZE) {
+        bufferIndex = 0;
+        bufferFull = true;
+    }
+    
+    // Analyze samples periodically
+    if (now - lastAnalysisMs >= ANALYSIS_INTERVAL_MS) {
+        analyzeRecentSamples();
+        lastAnalysisMs = now;
     }
 }
 
@@ -159,8 +161,8 @@ void setup()
 
 	Serial.println("BMI160 configured: ACC=±4g @100Hz, GYR=±500dps @100Hz");
 	
-	// Start calibration
-	startCalibration();
+	// Start continuous calibration
+	initializeContinuousCalibration();
 }
 
 void loop()
@@ -185,17 +187,17 @@ void loop()
 	// Calculate magnitude in DPS (exactly like your working code)
 	float magnitude_dps = sensor.getMagnitudeDPS(gx, gy, gz);
 
-	// Perform calibration
-	performCalibration(magnitude_dps);
+	// Collect sample and analyze continuously
+	collectAndAnalyzeSample(magnitude_dps);
 
 	// Print in the same format as your working code
 	// Serial.print("GYR |dps|: ");
 	// Serial.println(magnitude_dps, 3);
 
-	// Wave detection logic (only when not calibrating)
+	// Wave detection logic
 	uint32_t now = millis();
 
-	if (!calibrationMode && armed && magnitude_dps > THRESHOLD)
+	if (armed && magnitude_dps > THRESHOLD)
 	{
 		if (now - lastEventMs > REFRACT_MS)
 		{
@@ -209,38 +211,17 @@ void loop()
 			digitalWrite(LED_PIN, HIGH);
 		}
 	}
-	else if (!calibrationMode && !armed && magnitude_dps < HYSTERESIS)
+	else if (!armed && magnitude_dps < HYSTERESIS)
 	{
 		armed = true; // re-arm below hysteresis
 	}
-	else if (!calibrationMode) {
+	else {
 		// print every 1000 ms when no wave detected, use separate timer
 		static uint32_t lastPrintMs = 0;
 		if (now - lastPrintMs > 1000) {
 			Serial.printf("No wave detected. GYR |dps|: %.2f (TH: %.2f, HY: %.2f)\n", 
 				magnitude_dps, THRESHOLD, HYSTERESIS);
 			lastPrintMs = now;
-		}
-	}
-	else if (calibrationMode) {
-		// Show calibration progress
-		static uint32_t lastCalibPrintMs = 0;
-		if (now - lastCalibPrintMs > 1000) {
-			uint32_t elapsed = now - calibrationStartMs;
-			uint32_t remaining = (CALIBRATION_DURATION_MS - elapsed) / 1000;
-			
-			// Calculate current average
-			float currentAvg = 0;
-			if (sampleIndex > 0) {
-				for (int i = 0; i < sampleIndex; i++) {
-					currentAvg += dpsSamples[i];
-				}
-				currentAvg /= sampleIndex;
-			}
-			
-			Serial.printf("Calibrating... %lu seconds remaining. Samples: %d, Avg: %.2f DPS\n", 
-				remaining, sampleIndex, currentAvg);
-			lastCalibPrintMs = now;
 		}
 	}
 
