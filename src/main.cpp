@@ -3,6 +3,7 @@
 
 #define SDA_PIN 8
 #define SCL_PIN 9
+#define LED_PIN 4
 
 // Create BMI160 sensor instance
 BMI160 sensor(SDA_PIN, SCL_PIN, 400000);
@@ -15,11 +16,20 @@ static const uint32_t REFRACT_MS = 300;  // debounce between waves
 bool armed = true;
 uint32_t lastEventMs = 0;
 
+// LED blink state
+bool ledBlinking = false;
+uint32_t ledBlinkStartMs = 0;
+static const uint32_t LED_BLINK_DURATION_MS = 100;
+
 void setup()
 {
 	Serial.begin(115200);
 	delay(2000);
 	Serial.println("Wave trigger (BMI160 + ESP32-C3)");
+	
+	// Initialize LED pin
+	pinMode(LED_PIN, OUTPUT);
+	digitalWrite(LED_PIN, LOW);
 
 	Serial.println("Initializing BMI160 sensor...");
 	while (!sensor.begin())
@@ -74,6 +84,11 @@ void loop()
 			Serial.println("WAVE!");
 			lastEventMs = now;
 			armed = false;
+			
+			// Start LED blink (asynchronous) - always restart for new waves
+			ledBlinking = true;
+			ledBlinkStartMs = now;
+			digitalWrite(LED_PIN, HIGH);
 		}
 	}
 	else if (!armed && magnitude_dps < HYSTERESIS)
@@ -87,6 +102,13 @@ void loop()
 			Serial.printf("No wave detected. GYR |dps|: %.2f\n", magnitude_dps);
 			lastPrintMs = now;
 		}
+	}
+
+	// Handle LED blink (asynchronous) - do this first
+	uint32_t now = millis();
+	if (ledBlinking && (now - ledBlinkStartMs >= LED_BLINK_DURATION_MS)) {
+		digitalWrite(LED_PIN, LOW);
+		ledBlinking = false;
 	}
 
 	delay(50); // ~20 Hz print rate; sensors run at 100 Hz
