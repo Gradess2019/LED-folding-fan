@@ -1,0 +1,14 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../BMI160"
+		},
+		{
+			"path": "../DebugModule"
+		}
+	],
+	"settings": {}
+}
