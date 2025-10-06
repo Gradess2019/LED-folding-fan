@@ -11,12 +11,23 @@ BMI160 sensor(SDA_PIN, SCL_PIN, 400000);
 // Wave detection thresholds (DPS - degrees per second) - will be calibrated dynamically
 float THRESHOLD = 300.0f;     // Trigger threshold (calibrated)
 float HYSTERESIS = 200.0f;    // Re-arm threshold (calibrated)
-static const uint32_t REFRACT_MS = 300;  // debounce between waves
+static const uint32_t REFRACT_MS = 200;  // debounce between waves
 
 // Continuous calibration parameters
 #define SAMPLE_BUFFER_SIZE 100  // Rolling buffer of recent samples
 #define MIN_SAMPLES_FOR_ANALYSIS 20  // Minimum samples needed for analysis
-#define ANALYSIS_INTERVAL_MS 2000  // Recalculate thresholds every 2 seconds
+#define ANALYSIS_INTERVAL_MS 250  // Recalculate thresholds every 0.25 seconds
+
+// Threshold and hysteresis bounds
+#define MIN_THRESHOLD 100.0f
+#define MAX_THRESHOLD 1000.0f
+#define MIN_HYSTERESIS 50.0f
+#define MAX_HYSTERESIS 800.0f
+
+// Analysis parameters
+#define BASELINE_PERCENTILE 50.0f    // Use values below 50th percentile for baseline noise
+#define ACTIVITY_PERCENTILE 75.0f    // Use values above 75th percentile for activity analysis
+#define ADAPTATION_RATE 1.0f        // 100% change per analysis cycle for immediate adaptation
 
 // Continuous calibration state
 float sampleBuffer[SAMPLE_BUFFER_SIZE];
@@ -41,78 +52,98 @@ void initializeContinuousCalibration() {
     Serial.println("Move the sensor naturally to establish baseline patterns.");
 }
 
-// Continuous wave analysis function
+// Optimized wave analysis function - no sorting needed!
 void analyzeRecentSamples() {
     int sampleCount = bufferFull ? SAMPLE_BUFFER_SIZE : bufferIndex;
     if (sampleCount < MIN_SAMPLES_FOR_ANALYSIS) return;
     
-    // Create working copy for sorting
-    float workingSamples[SAMPLE_BUFFER_SIZE];
+    // Calculate running statistics without sorting
+    float sum = 0;
+    float sumSquared = 0;
+    float minVal = sampleBuffer[0];
+    float maxVal = sampleBuffer[0];
+    
     for (int i = 0; i < sampleCount; i++) {
-        workingSamples[i] = sampleBuffer[i];
+        float val = sampleBuffer[i];
+        sum += val;
+        sumSquared += val * val;
+        if (val < minVal) minVal = val;
+        if (val > maxVal) maxVal = val;
     }
     
-    // Simple bubble sort
-    for (int i = 0; i < sampleCount - 1; i++) {
-        for (int j = 0; j < sampleCount - i - 1; j++) {
-            if (workingSamples[j] > workingSamples[j + 1]) {
-                float temp = workingSamples[j];
-                workingSamples[j] = workingSamples[j + 1];
-                workingSamples[j + 1] = temp;
-            }
+    // Calculate basic statistics
+    float mean = sum / sampleCount;
+    float variance = (sumSquared / sampleCount) - (mean * mean);
+    float stdDev = sqrt(variance);
+    
+    // Estimate percentiles using mean and standard deviation
+    // This is much faster than sorting and gives good approximations
+    float p25 = mean - 0.67f * stdDev;  // Approximate 25th percentile
+    float p50 = mean;                   // 50th percentile (median approximation)
+    float p75 = mean + 0.67f * stdDev;  // Approximate 75th percentile
+    float p90 = mean + 1.28f * stdDev;  // Approximate 90th percentile
+    
+    // Calculate baseline noise using recent low values
+    // BASELINE: Sensor readings during quiet periods (no waves, just ambient movement)
+    float baselineNoise = 0;
+    int baselineCount = 0;
+    for (int i = 0; i < sampleCount; i++) {
+        if (sampleBuffer[i] <= p50) {  // Use values below median as baseline
+            baselineNoise += sampleBuffer[i];
+            baselineCount++;
         }
     }
-    
-    // Calculate percentiles from recent samples
-    float p25 = workingSamples[(int)(sampleCount * 0.25)];  // 25th percentile
-    float p50 = workingSamples[(int)(sampleCount * 0.50)];  // 50th percentile (median)
-    float p75 = workingSamples[(int)(sampleCount * 0.75)];  // 75th percentile
-    float p90 = workingSamples[(int)(sampleCount * 0.90)];  // 90th percentile
-    
-    // Calculate baseline noise (average of bottom 40%)
-    float baselineNoise = 0;
-    int baselineCount = (int)(sampleCount * 0.4);
-    for (int i = 0; i < baselineCount; i++) {
-        baselineNoise += workingSamples[i];
+    if (baselineCount > 0) {
+        baselineNoise /= baselineCount;
+    } else {
+        baselineNoise = p25;  // Fallback to estimated 25th percentile
     }
-    baselineNoise /= baselineCount;
     
-    // Calculate recent activity (average of top 30%)
+    // Calculate recent activity using recent high values
+    // RECENT ACTIVITY: Sensor readings during active periods (waves, movements, gestures)
+    // activityCount: Number of samples that represent high activity (above 75th percentile)
     float recentActivity = 0;
-    int activityCount = (int)(sampleCount * 0.3);
-    for (int i = sampleCount - activityCount; i < sampleCount; i++) {
-        recentActivity += workingSamples[i];
+    int activityCount = 0;
+    for (int i = 0; i < sampleCount; i++) {
+        if (sampleBuffer[i] >= p75) {  // Use values above 75th percentile
+            recentActivity += sampleBuffer[i];
+            activityCount++;
+        }
     }
-    recentActivity /= activityCount;
+    if (activityCount > 0) {
+        recentActivity /= activityCount;
+    } else {
+        recentActivity = p90;  // Fallback to estimated 90th percentile
+    }
     
-    // Adaptive threshold calculation
-    // Use 75th percentile as base, but ensure it's above noise
-    float newThreshold = max(p75, baselineNoise * 2.5f);
-    newThreshold = min(newThreshold, recentActivity * 0.7f); // Don't go too high
+    // Smart threshold calculation using statistical approach
+    float newThreshold = max(p75, baselineNoise * 2.0f);
+    newThreshold = min(newThreshold, recentActivity * 0.8f);
     
     // Adaptive hysteresis calculation
-    float newHysteresis = max(baselineNoise * 1.8f, newThreshold * 0.5f);
+    float newHysteresis = max(baselineNoise * 1.5f, newThreshold * 0.4f);
     newHysteresis = min(newHysteresis, newThreshold * 0.8f);
     
     // Smooth threshold changes to avoid sudden jumps
     float thresholdChange = newThreshold - THRESHOLD;
     float hysteresisChange = newHysteresis - HYSTERESIS;
     
-    // Apply gradual changes (max 20% change per analysis)
-    THRESHOLD += thresholdChange * 0.2f;
-    HYSTERESIS += hysteresisChange * 0.2f;
+    // Apply gradual changes using adaptation rate constant
+    THRESHOLD += thresholdChange * ADAPTATION_RATE;
+    HYSTERESIS += hysteresisChange * ADAPTATION_RATE;
     
-    // Ensure reasonable bounds
-    if (THRESHOLD < 15.0f) THRESHOLD = 15.0f;
-    if (THRESHOLD > 1000.0f) THRESHOLD = 1000.0f;
-    if (HYSTERESIS < 8.0f) HYSTERESIS = 8.0f;
+    // Ensure reasonable bounds using constants
+    if (THRESHOLD < MIN_THRESHOLD) THRESHOLD = MIN_THRESHOLD;
+    if (THRESHOLD > MAX_THRESHOLD) THRESHOLD = MAX_THRESHOLD;
+    if (HYSTERESIS < MIN_HYSTERESIS) HYSTERESIS = MIN_HYSTERESIS;
+    if (HYSTERESIS > MAX_HYSTERESIS) HYSTERESIS = MAX_HYSTERESIS;
     if (HYSTERESIS > THRESHOLD * 0.9f) HYSTERESIS = THRESHOLD * 0.9f;
     
     // Debug output (less frequent)
     static uint32_t lastDebugMs = 0;
     if (millis() - lastDebugMs > 5000) { // Every 5 seconds
-        Serial.printf("Adaptive thresholds - Samples: %d, TH: %.1f, HY: %.1f\n", 
-            sampleCount, THRESHOLD, HYSTERESIS);
+        Serial.printf("Adaptive thresholds - Samples: %d, Mean: %.1f, StdDev: %.1f, TH: %.1f, HY: %.1f\n", 
+            sampleCount, mean, stdDev, THRESHOLD, HYSTERESIS);
         lastDebugMs = millis();
     }
 }
@@ -190,10 +221,6 @@ void loop()
 	// Collect sample and analyze continuously
 	collectAndAnalyzeSample(magnitude_dps);
 
-	// Print in the same format as your working code
-	// Serial.print("GYR |dps|: ");
-	// Serial.println(magnitude_dps, 3);
-
 	// Wave detection logic
 	uint32_t now = millis();
 
@@ -231,5 +258,5 @@ void loop()
 		ledBlinking = false;
 	}
 
-	delay(50); // ~20 Hz print rate; sensors run at 100 Hz
+	delay(10); // ~100 Hz update rate; sensors run at 100 Hz
 }
