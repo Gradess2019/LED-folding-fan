@@ -1,0 +1,7 @@
+.pio
+.vscode
+.idea
+.dummy
+lib
+managed_components
+sdkconfig.*
