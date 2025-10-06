@@ -3,6 +3,7 @@
 
 #define SDA_PIN 8
 #define SCL_PIN 9
+#define LED_PIN 3
 
 // Create BMI160 sensor instance
 BMI160 sensor(SDA_PIN, SCL_PIN, 400000);
@@ -20,6 +21,10 @@ void setup()
 	Serial.begin(115200);
 	delay(2000);
 	Serial.println("Wave trigger (BMI160 + ESP32-C3)");
+	
+	// Initialize LED pin
+	pinMode(LED_PIN, OUTPUT);
+	digitalWrite(LED_PIN, LOW);
 
 	Serial.println("Initializing BMI160 sensor...");
 	while (!sensor.begin())
@@ -74,6 +79,11 @@ void loop()
 			Serial.println("WAVE!");
 			lastEventMs = now;
 			armed = false;
+			
+			// Blink LED when wave is detected
+			digitalWrite(LED_PIN, HIGH);
+			delay(100);
+			digitalWrite(LED_PIN, LOW);
 		}
 	}
 	else if (!armed && magnitude_dps < HYSTERESIS)
