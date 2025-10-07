@@ -1,3 +1,7 @@
+#if !defined(G_LOG_WAVE_APP)
+    #define LOG_DISABLE
+#endif
+#include <Utils.h>
 #include "WaveApp.h"
 
 WaveApp::WaveApp() 
@@ -7,52 +11,52 @@ WaveApp::WaveApp()
 }
 
 bool WaveApp::initializeSensor() {
-    Serial.println("Initializing BMI160 sensor...");
+    LOG_INFO("Initializing BMI160 sensor...");
     while (!sensor.begin()) {
-        Serial.println("ERROR: BMI160 not found or failed to initialize. Retrying...");
+        LOG_ERROR("BMI160 not found or failed to initialize. Retrying...");
         delay(1000);
     }
     
-    Serial.printf("BMI160 @0x%02X, CHIP_ID=0x%02X\n", sensor.getI2CAddress(), sensor.getChipID());
+    LOGF_INFO("BMI160 @0x%02X, CHIP_ID=0x%02X", sensor.getI2CAddress(), sensor.getChipID());
 
     uint8_t pmu = sensor.getPowerModeStatus();
     uint8_t err = sensor.getErrorRegister();
-    Serial.printf("PMU_STATUS=0x%02X, ERR_REG=0x%02X\n", pmu, err);
+    LOGF_INFO("PMU_STATUS=0x%02X, ERR_REG=0x%02X", pmu, err);
 
-    Serial.println("BMI160 configured: ACC=±4g @100Hz, GYR=±500dps @100Hz");
+    LOG_INFO("BMI160 configured: ACC=±4g @100Hz, GYR=±500dps @100Hz");
     return true;
 }
 
 void WaveApp::handleSensorError() {
-    Serial.println("ERROR: Failed to read gyroscope data. Resetting sensor...");
+    LOG_ERROR("Failed to read gyroscope data. Resetting sensor...");
     sensor.reset();
     delay(1000);
     
     // Re-initialize sensor after reset
-    Serial.println("Re-initializing sensor after reset...");
+    LOG_INFO("Re-initializing sensor after reset...");
     while (!sensor.begin()) {
-        Serial.println("ERROR: BMI160 re-initialization failed. Retrying...");
+        LOG_ERROR("BMI160 re-initialization failed. Retrying...");
         delay(1000);
     }
-    Serial.println("Sensor re-initialized successfully");
+    LOG_INFO("Sensor re-initialized successfully");
 }
 
 void WaveApp::printDebugInfo(float magnitude, uint32_t now) {
     if (now - lastPrintMs > 1000) {
-        Serial.printf("No wave detected. GYR |dps|: %.2f (TH: %.2f, HY: %.2f)\n", 
+        LOGF_DEBUG("No wave detected. GYR |dps|: %.2f (TH: %.2f, HY: %.2f)", 
             magnitude, detector.getThreshold(), detector.getHysteresis());
         lastPrintMs = now;
     }
 }
 
 void WaveApp::setup() {
-    Serial.begin(115200);
+    LOG_BEGIN(115200);
     delay(2000);
-    Serial.println("Wave trigger (BMI160 + ESP32-C3)");
+    LOG_INFO("Wave trigger (BMI160 + ESP32-C3)");
     
     // Initialize sensor
     if (!initializeSensor()) {
-        Serial.println("FATAL: Failed to initialize sensor");
+        LOG_ERROR("FATAL: Failed to initialize sensor");
         return;
     }
     
@@ -82,8 +86,6 @@ void WaveApp::loop() {
     uint32_t now = millis();
     
     if (detector.detectWave(magnitude_dps, now)) {
-        Serial.println("WAVE!");
-        
         // Start LED blink
         ledBlinker.trigger(LED_BLINK_DURATION_MS);
     } else {

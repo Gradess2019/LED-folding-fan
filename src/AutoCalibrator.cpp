@@ -1,3 +1,7 @@
+#if !defined(G_LOG_AUTO_CALIBRATOR)
+    #define LOG_DISABLE
+#endif
+#include <Utils.h>
 #include "AutoCalibrator.h"
 #include <math.h>
 
@@ -16,9 +20,9 @@ AutoCalibrator::AutoCalibrator()
 
 void AutoCalibrator::initialize() {
     lastAnalysisMs = millis();
-    Serial.println("=== CONTINUOUS CALIBRATION STARTED ===");
-    Serial.println("System will continuously adapt thresholds based on sensor data.");
-    Serial.println("Move the sensor naturally to establish baseline patterns.");
+    LOG_INFO("=== CONTINUOUS CALIBRATION STARTED ===");
+    LOG_INFO("System will continuously adapt thresholds based on sensor data.");
+    LOG_INFO("Move the sensor naturally to establish baseline patterns.");
 }
 
 void AutoCalibrator::update(const SampleBuffer& buffer) {
@@ -31,8 +35,11 @@ void AutoCalibrator::update(const SampleBuffer& buffer) {
     
     int sampleCount = buffer.size();
     if (sampleCount < MIN_SAMPLES_FOR_ANALYSIS) {
+        LOGF_TRACE("Not enough samples for analysis (%d/%d)", sampleCount, MIN_SAMPLES_FOR_ANALYSIS);
         return;
     }
+    
+    LOGF_DEBUG("Starting analysis with %d samples", sampleCount);
     
     // Calculate statistics
     float mean, stdDev, p25, p50, p75, p90;
@@ -45,7 +52,7 @@ void AutoCalibrator::update(const SampleBuffer& buffer) {
     
     // Debug output (less frequent)
     if (now - lastDebugMs > 5000) { // Every 5 seconds
-        Serial.printf("Adaptive thresholds - Samples: %d, Mean: %.1f, StdDev: %.1f, TH: %.1f, HY: %.1f\n", 
+        LOGF_INFO("Adaptive thresholds - Samples: %d, Mean: %.1f, StdDev: %.1f, TH: %.1f, HY: %.1f", 
             sampleCount, mean, stdDev, threshold, hysteresis);
         lastDebugMs = now;
     }
@@ -130,9 +137,26 @@ void AutoCalibrator::updateThresholds(const SampleBuffer& buffer, int sampleCoun
     hysteresis += hysteresisChange * ADAPTATION_RATE;
     
     // Ensure reasonable bounds
-    if (threshold < MIN_THRESHOLD) threshold = MIN_THRESHOLD;
-    if (threshold > MAX_THRESHOLD) threshold = MAX_THRESHOLD;
-    if (hysteresis < MIN_HYSTERESIS) hysteresis = MIN_HYSTERESIS;
-    if (hysteresis > MAX_HYSTERESIS) hysteresis = MAX_HYSTERESIS;
-    if (hysteresis > threshold * 0.9f) hysteresis = threshold * 0.9f;
+    if (threshold < MIN_THRESHOLD) {
+        threshold = MIN_THRESHOLD;
+        LOG_DEBUG("Threshold clamped to minimum");
+    }
+    if (threshold > MAX_THRESHOLD) {
+        threshold = MAX_THRESHOLD;
+        LOG_DEBUG("Threshold clamped to maximum");
+    }
+    if (hysteresis < MIN_HYSTERESIS) {
+        hysteresis = MIN_HYSTERESIS;
+        LOG_DEBUG("Hysteresis clamped to minimum");
+    }
+    if (hysteresis > MAX_HYSTERESIS) {
+        hysteresis = MAX_HYSTERESIS;
+        LOG_DEBUG("Hysteresis clamped to maximum");
+    }
+    if (hysteresis > threshold * 0.9f) {
+        hysteresis = threshold * 0.9f;
+        LOG_DEBUG("Hysteresis adjusted to maintain ratio");
+    }
+    
+    LOGF_TRACE("Updated thresholds - TH: %.2f, HY: %.2f", threshold, hysteresis);
 }

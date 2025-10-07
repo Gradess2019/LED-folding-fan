@@ -1,3 +1,7 @@
+#if !defined(G_LOG_SAMPLE_BUFFER)
+    #define LOG_DISABLE
+#endif
+#include <Utils.h>
 #include "SampleBuffer.h"
 
 SampleBuffer::SampleBuffer() : head(0), count(0), isFull(false) {
@@ -11,8 +15,11 @@ void SampleBuffer::push(float sample) {
         count++;
         if (count >= BUFFER_SIZE) {
             isFull = true;
+            LOG_DEBUG("Buffer is now full");
         }
     }
+    
+    LOGF_TRACE("Pushed sample %.2f, head=%d, count=%d", sample, head, count);
 }
 
 int SampleBuffer::size() const {
@@ -41,6 +48,7 @@ void SampleBuffer::clear() {
     head = 0;
     count = 0;
     isFull = false;
+    LOG_DEBUG("Buffer cleared");
 }
 
 float SampleBuffer::operator[](int index) const {
