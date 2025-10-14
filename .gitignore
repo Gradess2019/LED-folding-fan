@@ -5,3 +5,6 @@
 lib
 managed_components
 sdkconfig.*
+dependencies.lock
+CMakeLists.txt
+LED_fan.code-workspace
